@@ -173,7 +173,8 @@ end
 -- @param trace the traceback string
 -- @param opts optional table. `strip` is a list of Lua patterns removed from
 --  the start of every filename. `in_app` is a function receiving the stripped
---  filename and returning whether the frame belongs to the application.
+--  filename and the original one, returning whether the frame belongs to the
+--  application.
 -- @return a table suitable for the `stacktrace` field of an exception
 -- @usage
 -- exception[1].stacktrace = raven.parse_traceback(trace, {
@@ -192,9 +193,9 @@ function _M.parse_traceback(trace, opts)
 
     local frames = {}
     for line in tostring(trace):gmatch("[^\n]+") do
-        local src, lineno, rest = line:match("^%s*(.-):(%d+): in (.*)$")
-        if src then
-            src = clean(src)
+        local raw, lineno, rest = line:match("^%s*(.-):(%d+): in (.*)$")
+        if raw then
+            local src = clean(raw)
             local fn = rest:match("^%a+ '([^']+)'")
             if not fn then
                 local anon = rest:match("^function <(.-)>")
@@ -206,7 +207,7 @@ function _M.parse_traceback(trace, opts)
                 lineno = tonumber(lineno),
             }
             if opts.in_app then
-                frame.in_app = opts.in_app(src) and true or false
+                frame.in_app = opts.in_app(src, raw) and true or false
             end
             table_insert(frames, 1, frame)
         end
