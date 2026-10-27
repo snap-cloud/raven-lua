@@ -166,6 +166,54 @@ function _M.get_release()
     return nil
 end
 
+--- Convert a Lua traceback string (as returned by `debug.traceback`) into a
+-- Sentry stacktrace table, oldest frame first. Useful when the stack of the
+-- original error is no longer live, for instance when an error handler
+-- receives the traceback as a string.
+-- @param trace the traceback string
+-- @param opts optional table. `strip` is a list of Lua patterns removed from
+--  the start of every filename. `in_app` is a function receiving the stripped
+--  filename and returning whether the frame belongs to the application.
+-- @return a table suitable for the `stacktrace` field of an exception
+-- @usage
+-- exception[1].stacktrace = raven.parse_traceback(trace, {
+--     strip = { "^%./" },
+--     in_app = function(filename) return not filename:find("^lua_modules/") end,
+-- })
+function _M.parse_traceback(trace, opts)
+    opts = opts or {}
+    local strip = opts.strip or {}
+    local function clean(path)
+        for _, pattern in ipairs(strip) do
+            path = path:gsub(pattern, "", 1)
+        end
+        return path
+    end
+
+    local frames = {}
+    for line in tostring(trace):gmatch("[^\n]+") do
+        local src, lineno, rest = line:match("^%s*(.-):(%d+): in (.*)$")
+        if src then
+            src = clean(src)
+            local fn = rest:match("^%a+ '([^']+)'")
+            if not fn then
+                local anon = rest:match("^function <(.-)>")
+                fn = anon and ("<" .. clean(anon) .. ">") or rest
+            end
+            local frame = {
+                filename = src,
+                ["function"] = fn,
+                lineno = tonumber(lineno),
+            }
+            if opts.in_app then
+                frame.in_app = opts.in_app(src) and true or false
+            end
+            table_insert(frames, 1, frame)
+        end
+    end
+    return { frames = frames }
+end
+
 --- This table can be used to tune the message reporting.
 -- @field tags Tags for the message, they will be coalesced with the ones
 --  provided in the @{sentry_conf} table used in the constructor if any. In
@@ -178,6 +226,14 @@ end
 --  useless frames. The internal raven frames are automatically skipped, so a
 --  level of `1` is means that the direct caller will be reported as culprit.
 --
+-- @field culprit Overrides the culprit derived from the stack.
+--
+-- @field transaction Name of the transaction (route, task...) the event
+--  belongs to. Shown in the Sentry issue list.
+--
+-- @field fingerprint Array of strings used by Sentry to group the event,
+--  see [the grouping docs](https://docs.sentry.io/platforms/native/usage/sdk-fingerprinting/).
+--
 -- @table report_conf
 
 
@@ -187,7 +243,8 @@ end
 
 --- Send an exception to Sentry.
 -- See [reference](https://docs.sentry.io/clientdev/interfaces/exception/).
--- Note that the stack trace will be filled automatically.
+-- Note that the stack trace will be filled automatically unless the
+-- exception already carries a `stacktrace` field (see @{parse_traceback}).
 --
 -- Note that the `conf` table will be modified by the function, therefore it
 -- is not safe to reuse conf table across calls. Consider passing common
@@ -205,7 +262,7 @@ end
 --    type = "SyntaxError",
 --    value = "Wattttt!",
 --    module = "mymodule",
---    -- stacktrace is populated automatically
+--    -- stacktrace is populated automatically when absent
 -- } }
 -- local id, err = rvn:captureException(exception,
 --     { tags = { foo = "bar", abc = "def" }})
@@ -220,12 +277,12 @@ function raven_mt:captureException(exception, conf)
     end
 
     trace_level = conf.trace_level
-    exception[1].stacktrace = backtrace(trace_level)
+    exception[1].stacktrace = exception[1].stacktrace or backtrace(trace_level)
 
     local payload = {
         exception = exception,
         message = exception[1].value,
-        culprit = get_culprit(trace_level),
+        culprit = conf.culprit or get_culprit(trace_level),
     }
 
     -- because whether tail call will or will not appear in the stack back trace
@@ -333,6 +390,12 @@ function raven_mt:send_report(json, conf)
         end
         if conf.contexts then
             json.contexts = conf.contexts
+        end
+        if conf.transaction then
+            json.transaction = conf.transaction
+        end
+        if conf.fingerprint then
+            json.fingerprint = conf.fingerprint
         end
     else
         json.tags = self.tags

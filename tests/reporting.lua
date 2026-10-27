@@ -162,4 +162,43 @@ describe("Sentry error reporter", function()
         assert_equal("baz", ev.extra.foo)
         assert_equal("data", ev.extra.some)
     end)
+    test("parse traceback", function()
+        local trace = table.concat({
+            "stack traceback:",
+            "\t[C]: in function 'error'",
+            "\t./lua_modules/share/lua/5.1/lapis/db/postgres.lua:302: in function 'insert'",
+            "\t./controllers/project.lua:646: in function <./controllers/project.lua:563>",
+        }, "\n")
+        local st = raven.parse_traceback(trace, {
+            strip = { "^%./", "^lua_modules/share/lua/[%d%.]+/" },
+            in_app = function(name) return not name:find("^lapis/") end,
+        })
+
+        assert_equal(2, #st.frames)
+        assert_equal("controllers/project.lua", st.frames[1].filename)
+        assert_equal(646, st.frames[1].lineno)
+        assert_equal("<controllers/project.lua:563>", st.frames[1]["function"])
+        assert_equal(true, st.frames[1].in_app)
+        assert_equal("lapis/db/postgres.lua", st.frames[2].filename)
+        assert_equal("insert", st.frames[2]["function"])
+        assert_equal(false, st.frames[2].in_app)
+    end)
+
+    test("provided stacktrace, culprit and transaction", function()
+        local sender = test_sender.new()
+        local rvn = raven.new { sender = sender }
+        local st = { frames = { { filename = "a.lua", lineno = 1 } } }
+
+        rvn:captureException({ { type = "E", value = "v", stacktrace = st } }, {
+            culprit = "a.lua in f",
+            transaction = "GET /things/:id",
+            fingerprint = { "custom" },
+        })
+
+        local ev = sender.events[1]
+        assert_equal("a.lua", ev.exception[1].stacktrace.frames[1].filename)
+        assert_equal("a.lua in f", ev.culprit)
+        assert_equal("GET /things/:id", ev.transaction)
+        assert_equal("custom", ev.fingerprint[1])
+    end)
 end)
